@@ -1,0 +1,13 @@
+ccxt
+pandas
+numpy
+scikit-learn
+tensorflow
+keras
+ta-lib
+websockets
+asyncio
+sqlalchemy
+python-dotenv
+requests
+openai  # For LLM integration
