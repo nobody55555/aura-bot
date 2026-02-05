@@ -5,6 +5,7 @@ import numpy as np
 from typing import List
 from openai import OpenAI
 import os
+import textwrap  # Für dedent, um saubere Prompts zu haben
 
 class AuraAnalyzer:
     def __init__(self, exchange='binance'):
@@ -13,6 +14,7 @@ class AuraAnalyzer:
             base_url=os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
             api_key=os.getenv('OPENAI_API_KEY', 'sk-')
         )
+        self.llm_model = os.getenv('LLM_MODEL', 'qwen-2.5-3b-instruct')  # Konfigurierbar via .env
 
     def fetch_ohlcv(self, symbol='BTC/USDT', timeframe='1h', limit=100):
         return pd.DataFrame(self.ex.fetch_ohlcv(symbol, timeframe, limit=limit),
@@ -57,36 +59,60 @@ class AuraAnalyzer:
         return 0.0
 
     def ml_prediction(self, ohlcv: pd.DataFrame) -> float:
+        # Berechne Indikatoren für den Prompt (reuse, um Duplikate zu vermeiden)
+        rsi = talib.RSI(ohlcv['close'])
+        macd, signal, _ = talib.MACD(ohlcv['close'])
+        bb_upper, bb_middle, bb_lower = talib.BBANDS(ohlcv['close'])
+
         data_str = ohlcv.tail(10).to_string()
-prompt = f"""
-You are a crypto market analyst. Analyze the following BTC/USDT market data (last 10 hourly candles):
-{data_str}
+        prompt = textwrap.dedent(f"""
+            You are a crypto market analyst. Analyze the following BTC/USDT market data (last 10 hourly candles):
+            {data_str}
 
-Key indicators:
-- RSI (last): {rsi[-1]:.2f} (overbought >70, oversold <30)
-- MACD: {macd[-1]:.2f} (positive and crossing up: bullish)
-- Bollinger Bands: Close relative to middle band ({bb_middle[-1]:.2f})
+            Key indicators:
+            - RSI (last): {rsi[-1]:.2f} (overbought >70, oversold <30)
+            - MACD: {macd[-1]:.2f} (positive and crossing up: bullish)
+            - Bollinger Bands: Close relative to middle band ({bb_middle[-1]:.2f})
 
-Predict the short-term direction: bullish (up), bearish (down), or sideways (neutral).
-Provide a brief reasoning and a confidence score (0.0 to 1.0).
-Output format: Prediction: [bullish/bearish/sideways] | Confidence: [score] | Reasoning: [short text]
-"""
-        response = self.llm_client.chat.completions.create(
-            model="qwen-2.5-3b-instruct",  # Passe an dein Modell an
-            messages=[{"role": "user", "content": prompt}]
-        )
-        pred = response.choices[0].message.content.lower()
-        if 'bullish' in pred:
-            return 0.1
-        elif 'bearish' in pred:
-            return -0.1
-        return 0.0  # Sideways
+            Predict the short-term direction: bullish (up), bearish (down), or sideways (neutral).
+            Provide a brief reasoning and a confidence score (0.0 to 1.0).
+            Output format: Prediction: [bullish/bearish/sideways] | Confidence: [score] | Reasoning: [short text]
+        """)
+
+        try:
+            response = self.llm_client.chat.completions.create(
+                model=self.llm_model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            resp_text = response.choices[0].message.content.lower()
+            print(f"LLM Response: {resp_text}")  # Debugging-Print, entferne für Production
+        except Exception as e:
+            print(f"LLM API Error: {e}")
+            return 0.0  # Fallback bei API-Problemen
+
+        # Erweitertes Parsing: Robust gegen kleine Formatabweichungen
+        try:
+            parts = resp_text.split('|')
+            pred = parts[0].split('prediction:')[1].strip() if len(parts) > 0 else ''
+            conf_str = parts[1].split('confidence:')[1].strip() if len(parts) > 1 else '0.0'
+            conf = float(conf_str) if conf_str.replace('.', '').isdigit() else 0.0
+            # reasoning = parts[2].split('reasoning:')[1].strip() if len(parts) > 2 else ''  # Optional, falls du es loggst
+
+            if 'bullish' in pred:
+                return 0.2 * conf
+            elif 'bearish' in pred:
+                return -0.2 * conf
+            else:
+                return 0.0
+        except Exception as e:
+            print(f"LLM Parse Error: {e} | Raw Response: {resp_text}")
+            return 0.0  # Fallback
 
     def signal_strength(self, ohlcv: pd.DataFrame) -> bool:
         ew = self.elliott_wave(ohlcv)
         cs = self.candlestick_patterns(ohlcv)
         ind = self.indicators(ohlcv)
-        ml = self.ml_prediction(ohlcv)  # +0.1/-0.1 boost
+        ml = self.ml_prediction(ohlcv)  # Jetzt bis zu ±0.2 basierend auf Confidence
         total = ew + cs + ind + ml
-        print(f"Signal: EW={ew:.2f}, CS={cs:.2f}, IND={ind:.2f}, ML={ml:.2f} | Total={total:.2f}")
-        return total > 0.6
+        print(f"Signal Breakdown: EW={ew:.2f}, CS={cs:.2f}, IND={ind:.2f}, ML={ml:.2f} | Total={total:.2f}")
+        return total > 0.6  # Schwellwert bleibt, aber passe bei Bedarf (z.B. >0.7 für strengere Signals)
