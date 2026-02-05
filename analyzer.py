@@ -58,7 +58,19 @@ class AuraAnalyzer:
 
     def ml_prediction(self, ohlcv: pd.DataFrame) -> float:
         data_str = ohlcv.tail(10).to_string()
-        prompt = f"Analyze BTC market: {data_str}\nPredict: bullish, bearish, or sideways."
+prompt = f"""
+You are a crypto market analyst. Analyze the following BTC/USDT market data (last 10 hourly candles):
+{data_str}
+
+Key indicators:
+- RSI (last): {rsi[-1]:.2f} (overbought >70, oversold <30)
+- MACD: {macd[-1]:.2f} (positive and crossing up: bullish)
+- Bollinger Bands: Close relative to middle band ({bb_middle[-1]:.2f})
+
+Predict the short-term direction: bullish (up), bearish (down), or sideways (neutral).
+Provide a brief reasoning and a confidence score (0.0 to 1.0).
+Output format: Prediction: [bullish/bearish/sideways] | Confidence: [score] | Reasoning: [short text]
+"""
         response = self.llm_client.chat.completions.create(
             model="qwen-2.5-3b-instruct",  # Passe an dein Modell an
             messages=[{"role": "user", "content": prompt}]
