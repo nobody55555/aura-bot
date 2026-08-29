@@ -86,7 +86,8 @@ class SafetyMonitor:
 
     def update_bar_timestamp(self, symbol: str, bar_ts: Optional[float] = None) -> None:
         """Call this whenever a new bar / ticker arrives."""
-        self._last_bar_ts[symbol] = bar_ts or time.time()
+        # Use `is None` so that bar_ts=0 is accepted (tests / edge cases).
+        self._last_bar_ts[symbol] = time.time() if bar_ts is None else float(bar_ts)
 
     def check_stale(self, symbol: str) -> None:
         last = self._last_bar_ts.get(symbol)
