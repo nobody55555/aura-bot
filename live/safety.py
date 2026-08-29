@@ -39,12 +39,14 @@ class SafetyMonitor:
         max_clock_drift_seconds: float = 3.0,
         daily_loss_limit: float = 0.03,
         max_drawdown: float = 0.10,
+        alert_manager: Optional[Any] = None,
     ):
         self.repo = repository
         self.max_stale_seconds = max_stale_seconds
         self.max_clock_drift_seconds = max_clock_drift_seconds
         self.daily_loss_limit = daily_loss_limit
         self.max_drawdown = max_drawdown
+        self.alerts = alert_manager  # optional AlertManager
 
         # Runtime state (also mirrored to DB for crash recovery)
         self._last_bar_ts: dict[str, float] = {}          # symbol → unix ts
@@ -63,6 +65,11 @@ class SafetyMonitor:
         self.repo.set_system_state("kill_switch", "1")
         self.repo.record_risk_event("HALT", reason)
         logger.critical("SAFETY HALT: %s", reason)
+        if self.alerts is not None:
+            try:
+                self.alerts.halt(reason)
+            except Exception as e:
+                logger.error("Failed to send halt alert: %s", e)
 
     def resume(self, reason: str = "manual") -> None:
         self.repo.set_system_state("kill_switch", "0")
