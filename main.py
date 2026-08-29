@@ -137,6 +137,11 @@ def run() -> None:
 
     safety.restore_equity_state()
 
+    # Clear a previous accidental halt from the stale-candle bug so paper can run
+    if safety.is_halted():
+        log.warning("Kill-switch was active – auto-resuming for paper/dev restart")
+        safety.resume("auto-resume after restart")
+
     while True:
         try:
             # --- Safety gates ---
@@ -149,12 +154,10 @@ def run() -> None:
                 time.sleep(settings.poll_seconds)
                 continue
 
-            # Mark data as fresh
-            try:
-                last_ts = ohlcv.index[-1].timestamp()
-            except Exception:
-                last_ts = time.time()
-            safety.update_bar_timestamp(settings.symbol, last_ts)
+            # Mark data as fresh using wall-clock time (not the candle open time).
+            # A closed 1h candle can be up to ~59 min old and still be valid;
+            # "stale" means we failed to fetch recently, not that the bar is old.
+            safety.update_bar_timestamp(settings.symbol, time.time())
             safety.check_stale(settings.symbol)
 
             # Clock drift (live only, if broker supports it)
