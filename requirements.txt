@@ -1,13 +1,9 @@
-ccxt
-pandas
-numpy
-scikit-learn
-tensorflow
-keras
-ta-lib
-websockets
-asyncio
-sqlalchemy
-python-dotenv
-requests
-openai  # For LLM integration
+ccxt>=4.4,<5
+numpy>=1.26,<3
+pandas>=2.2,<3
+python-dotenv>=1.0,<2
+openai>=1.40,<2
+pytest>=8,<9
+ruff>=0.6,<1
+black>=24,<26
+tenacity>=8.2,<10
