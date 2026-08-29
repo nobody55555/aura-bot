@@ -39,7 +39,7 @@ def test_kill_switch(tmp_repo):
 
 def test_stale_data_triggers_halt(tmp_repo):
     safety = SafetyMonitor(tmp_repo, max_stale_seconds=1.0)
-    safety.update_bar_timestamp("BTC/USDT", bar_ts=0)  # very old
+    safety.update_bar_timestamp("BTC/USDT", bar_ts=0.0)  # epoch → very old
     with pytest.raises(SystemHalted):
         safety.check_stale("BTC/USDT")
     assert safety.is_halted()
@@ -47,19 +47,20 @@ def test_stale_data_triggers_halt(tmp_repo):
 
 def test_daily_loss_halt(tmp_repo):
     safety = SafetyMonitor(tmp_repo, daily_loss_limit=0.02, max_drawdown=0.50)
-    safety.update_equity(10_000.0)          # day start
-    safety.update_equity(9_700.0)           # -3 % → should halt
+    safety.update_equity(10_000.0)  # day start
     with pytest.raises(RiskLimitExceeded):
-        safety.update_equity(9_700.0)
+        safety.update_equity(9_700.0)  # -3 % → halt
     assert safety.is_halted()
 
 
 def test_reconcile_with_paper(tmp_repo, paper):
     om = OrderManager(paper, tmp_repo)
-    # create a limit order that stays open
     order = om.create_entry_order(
-        "BTC/USDT", OrderSide.BUY, 0.01,
-        order_type=OrderType.LIMIT, price=50_000.0,
+        "BTC/USDT",
+        OrderSide.BUY,
+        0.01,
+        order_type=OrderType.LIMIT,
+        price=50_000.0,
         place_protection=False,
     )
     assert order.status == OrderState.OPEN
