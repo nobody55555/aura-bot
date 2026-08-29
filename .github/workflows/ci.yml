@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,18 +25,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Only syntax/undefined-name class issues — not import sorting / unused imports
       - name: Ruff (critical only)
-        run: ruff check --select E9,F63,F7,F82 --ignore E501 .
+        run: python -m ruff check --select E9,F63,F7,F82 --ignore E501 .
 
-      - name: Syntax check (root + live)
+      - name: Syntax check
         run: |
           python -m py_compile config.py analyzer.py features.py strategy.py elliott.py risk.py main.py
-          python -m compileall -q live
+          python -m compileall -q live tests
+
+      - name: Smoke imports
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -c "from live.models import Order; from live.broker.paper import PaperBroker; from live.order_manager import OrderManager; from live.safety import SafetyMonitor; print('imports ok')"
 
       - name: Unit tests
-        run: pytest tests/ -q --tb=short
-
-      - name: Black format check (informational)
-        continue-on-error: true
-        run: black --check --diff . || true
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m pytest tests/ -v --tb=short
