@@ -322,7 +322,7 @@ class CcxtBroker(AbstractBroker):
         except Exception as e:
             raise self._map_exception(e) from e
 
-    def fetch_balance(self) -> dict[str, float]:
+    def fetch_balance(self) -> dict[str, dict[str, float | None]]:
         try:
             raw = self.exchange.fetch_balance()
             # Normalise to the shape PaperBroker also uses
@@ -331,9 +331,10 @@ class CcxtBroker(AbstractBroker):
                 if not isinstance(info, dict):
                     continue
                 if "free" in info or "total" in info:
+                    total_value = info.get("total")
                     result[currency] = {
                         "free": float(info.get("free") or 0),
-                        "total": float(info.get("total") or 0),
+                        "total": None if total_value is None else float(total_value),
                     }
             return result
         except Exception as e:

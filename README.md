@@ -90,9 +90,9 @@ All settings via environment / `.env` (see `.env.example`):
 | `SYMBOL` | `BTC/USDT` | |
 | `TIMEFRAME` | `1h` | |
 | `POLL_SECONDS` | `300` | Loop interval |
-| `RISK_PER_TRADE` | `0.01` | 1 % |
-| `DAILY_LOSS_LIMIT` | `0.03` | Hard halt |
-| `MAX_DRAWDOWN` | `0.15` | Hard halt |
+| `RISK_PER_TRADE` | `0.01` | Maximum 1 % per trade |
+| `DAILY_LOSS_LIMIT` | `0.02` | Maximum 2 %; hard halt at the threshold |
+| `MAX_DRAWDOWN` | `0.05` | Maximum 5 %; hard halt at the threshold |
 | `BINANCE_API_KEY` / `SECRET` | empty | Required only for live |
 | `ALERT_EMAIL_*` / `SMTP_*` | empty | Optional e-mail alerts |
 
@@ -149,11 +149,33 @@ Prefer validating signal quality in backtests before relying on paper/live behav
 
 ---
 
+## Hyperliquid Testnet (read-only)
+
+`live/hyperliquid_testnet.py` is an isolated, read-only client for HIP-4 outcome metadata and market data. Its `find_outcomes` method fetches `{"type":"outcomeMeta"}` and filters the returned outcomes locally; additional read-only methods retrieve price contexts via `spotMetaAndAssetCtxs` and order books via `l2Book`. It has no signing, wallet, order, cancel, transfer, or HyperEVM methods, and is not wired into the trading runtime.
+
+The REST base comes from the official SDK's `constants.TESTNET_API_URL` (SDK version pinned in `requirements.txt`); the client revalidates the exact Testnet endpoints before every request, and URL overrides, a missing `HL_ENV`, or any value other than `testnet` fail closed. Set `HL_ENV=testnet` explicitly before constructing the client. It uses a direct fixed-host HTTPS request rather than constructing an SDK `Info` or `Exchange` object, so there is no nullable SDK `base_url` default or signing engine in this path. For example:
+
+```python
+import os
+
+os.environ["HL_ENV"] = "testnet"
+
+from live.hyperliquid_testnet import HyperliquidTestnetClient
+
+client = HyperliquidTestnetClient()
+btc_outcomes = client.find_outcomes(underlying="BTC")
+print(btc_outcomes)
+```
+
+The official REST base is `https://api.hyperliquid-testnet.xyz` (not the host without `api.`), as listed in the [SDK constants](https://github.com/hyperliquid-dex/hyperliquid-python-sdk/blob/master/hyperliquid/utils/constants.py); the [API docs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api) say the same requests can be made against Testnet. HIP-4's [`outcomeMeta` Info request](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/spot) returns the outcome records. The official [Testnet WebSocket URL](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket) is `wss://api.hyperliquid-testnet.xyz/ws`, but this module does not open WebSocket connections. No Testnet orders are sent.
+
+---
+
 ## Live mode (not enabled by default)
 
 1. Set `AURA_MODE=live` and valid exchange credentials in `.env`.
 2. Run extensively in paper first.
-3. Remove the explicit live-order gate in `main.py` only when you accept the risk.
+3. Live order placement is currently hard-gated in `main.py`; this change does not enable it.
 4. Start with very small size and strict daily loss / drawdown limits.
 
 ---

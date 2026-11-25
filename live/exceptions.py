@@ -42,3 +42,7 @@ class RiskLimitExceeded(AuraLiveError):
 
 class SystemHalted(AuraLiveError):
     """Kill-switch is active – no new orders allowed."""
+
+
+class ProtectionOrderError(AuraLiveError):
+    """A filled entry could not be confirmed with the required protection orders."""

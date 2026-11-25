@@ -60,10 +60,10 @@ class AbstractBroker(ABC):
         ...
 
     @abstractmethod
-    def fetch_balance(self) -> dict[str, float]:
+    def fetch_balance(self) -> dict[str, dict[str, float | None]]:
         """
         Return free and total balances.
-        Expected shape: {"USDT": {"free": x, "total": y}, ...}
+        Expected shape: {"USDT": {"free": x, "total": y_or_none}, ...}
         """
         ...
 

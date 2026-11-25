@@ -145,7 +145,7 @@ class PaperBroker(AbstractBroker):
         ]
         return orders
 
-    def fetch_balance(self) -> dict[str, float]:
+    def fetch_balance(self) -> dict[str, dict[str, float | None]]:
         return self.balance
 
     def fetch_ticker(self, symbol: str) -> dict[str, float]:

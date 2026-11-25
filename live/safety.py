@@ -11,6 +11,8 @@ Safety monitors and operational controls.
 from __future__ import annotations
 
 import logging
+import math
+import numbers
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
@@ -20,6 +22,10 @@ from live.exceptions import SystemHalted, RiskLimitExceeded
 from live.models import Order, OrderState
 
 logger = logging.getLogger(__name__)
+
+_MIN_PLAUSIBLE_EXCHANGE_TIME_MS = 946684800000  # 2000-01-01 UTC
+_MAX_PLAUSIBLE_EXCHANGE_TIME_MS = 4102444800000  # 2100-01-01 UTC
+_UNSET = object()
 
 
 class SafetyMonitor:
@@ -37,11 +43,19 @@ class SafetyMonitor:
         repository: OrderRepository,
         max_stale_seconds: float = 120.0,
         max_clock_drift_seconds: float = 3.0,
-        daily_loss_limit: float = 0.03,
-        max_drawdown: float = 0.10,
+        daily_loss_limit: float = 0.02,
+        max_drawdown: float = 0.05,
         alert_manager: Optional[Any] = None,
     ):
         self.repo = repository
+        if not math.isfinite(max_stale_seconds) or max_stale_seconds <= 0:
+            raise ValueError("max_stale_seconds must be finite and positive")
+        if not math.isfinite(max_clock_drift_seconds) or max_clock_drift_seconds <= 0:
+            raise ValueError("max_clock_drift_seconds must be finite and positive")
+        if not math.isfinite(daily_loss_limit) or not 0 < daily_loss_limit <= 0.02:
+            raise ValueError("daily_loss_limit must be finite and in (0, 0.02]")
+        if not math.isfinite(max_drawdown) or not 0 < max_drawdown <= 0.05:
+            raise ValueError("max_drawdown must be finite and in (0, 0.05]")
         self.max_stale_seconds = max_stale_seconds
         self.max_clock_drift_seconds = max_clock_drift_seconds
         self.daily_loss_limit = daily_loss_limit
@@ -53,28 +67,102 @@ class SafetyMonitor:
         self._peak_equity: float = 0.0
         self._day_start_equity: float = 0.0
         self._current_day: Optional[str] = None
+        self._halted = False
+        self._halt_reason: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Kill switch
     # ------------------------------------------------------------------
 
     def is_halted(self) -> bool:
-        return self.repo.get_system_state("kill_switch", "0") == "1"
+        if self._halted:
+            return True
+        try:
+            halted = self.repo.get_system_state("kill_switch", "0") == "1"
+        except Exception as e:
+            self._halted = True
+            self._halt_reason = f"Cannot verify persisted kill-switch state: {e}"
+            logger.critical("Fail-closed: %s", self._halt_reason)
+            return True
+        if halted:
+            self._halted = True
+            try:
+                self._halt_reason = self.repo.get_system_state("kill_switch_reason")
+            except Exception:
+                self._halt_reason = None
+        return halted
+
+    def get_halt_reason(self) -> str:
+        if self._halt_reason:
+            return self._halt_reason
+        try:
+            reason = self.repo.get_system_state("kill_switch_reason")
+        except Exception as e:
+            return f"Reason unavailable because persistence failed: {e}"
+        return reason or "Persisted halt reason unavailable"
 
     def halt(self, reason: str) -> None:
-        self.repo.set_system_state("kill_switch", "1")
-        self.repo.record_risk_event("HALT", reason)
+        # Close the in-process gate before touching persistence. If the DB write
+        # fails, this process must still be unable to reach signal/order logic.
+        self._halted = True
+        self._halt_reason = str(reason)
         logger.critical("SAFETY HALT: %s", reason)
+        self.repo.set_system_state("kill_switch", "1")
+        self.repo.set_system_state("kill_switch_reason", str(reason))
+        self.repo.record_risk_event("HALT", str(reason))
         if self.alerts is not None:
             try:
                 self.alerts.halt(reason)
             except Exception as e:
                 logger.error("Failed to send halt alert: %s", e)
 
-    def resume(self, reason: str = "manual") -> None:
+    def resume(
+        self,
+        reason: str,
+        *,
+        equity: Any,
+        exchange_required: bool,
+        exchange_time_ms: Any = _UNSET,
+        operator_approved: bool = False,
+    ) -> None:
+        """Resume only after an explicit operator approval and valid preflight."""
+        if not operator_approved:
+            raise SystemHalted("Resume requires explicit operator approval")
+        if not isinstance(reason, str) or not reason.strip():
+            raise SystemHalted("Resume requires a non-empty operator reason")
+        if not self.is_halted():
+            raise SystemHalted("There is no active halt to resume")
+
+        halt_reason = self.get_halt_reason()
+        try:
+            self.update_equity(equity)
+            if exchange_required:
+                self.check_clock_drift(
+                    None if exchange_time_ms is _UNSET else exchange_time_ms
+                )
+            elif exchange_time_ms is not _UNSET:
+                self.check_clock_drift(exchange_time_ms)
+        except Exception as e:
+            denial = f"Resume denied; active halt={halt_reason}; preflight failed: {e}"
+            try:
+                self.repo.record_risk_event("RESUME_DENIED", denial)
+            except Exception as persist_error:
+                logger.critical("Could not persist resume denial: %s", persist_error)
+            if not self._halted:
+                self.halt(denial)
+            raise SystemHalted(denial) from e
+
+        approval = (
+            f"Operator approval: {reason.strip()}; cleared halt: {halt_reason}; "
+            f"equity={float(equity)}; exchange_time_checked={exchange_required or exchange_time_ms is not _UNSET}"
+        )
+        # Record approval before clearing the persistent gate. A failed audit
+        # write therefore leaves the halt active.
+        self.repo.record_risk_event("RESUME", approval)
         self.repo.set_system_state("kill_switch", "0")
-        self.repo.record_risk_event("RESUME", reason)
-        logger.warning("SAFETY RESUME: %s", reason)
+        self._halted = False
+        self._halt_reason = None
+        logger.warning("SAFETY RESUME: %s", approval)
 
     def require_not_halted(self) -> None:
         if self.is_halted():
@@ -92,7 +180,8 @@ class SafetyMonitor:
     def check_stale(self, symbol: str) -> None:
         last = self._last_bar_ts.get(symbol)
         if last is None:
-            return  # no data yet – not considered stale
+            self.halt(f"No market data timestamp for {symbol}")
+            raise SystemHalted(f"No market data timestamp for {symbol}")
         age = time.time() - last
         if age > self.max_stale_seconds:
             self.halt(f"Stale data for {symbol}: {age:.0f}s > {self.max_stale_seconds}s")
@@ -107,12 +196,33 @@ class SafetyMonitor:
         Compare local UTC time with exchange server time.
         exchange_time_ms comes from exchange.fetch_time() (milliseconds).
         """
-        if exchange_time_ms is None:
-            return
-        local_ms = int(time.time() * 1000)
-        drift_s = abs(local_ms - exchange_time_ms) / 1000.0
+        if (
+            isinstance(exchange_time_ms, bool)
+            or not isinstance(exchange_time_ms, numbers.Real)
+        ):
+            reason = f"Exchange time is not numeric: {exchange_time_ms!r}"
+            self.halt(reason)
+            raise SystemHalted(reason)
+        try:
+            exchange_ms = float(exchange_time_ms)
+        except (OverflowError, TypeError, ValueError):
+            reason = f"Exchange time is not finite or plausible: {exchange_time_ms!r}"
+            self.halt(reason)
+            raise SystemHalted(reason)
+        if (
+            not math.isfinite(exchange_ms)
+            or not _MIN_PLAUSIBLE_EXCHANGE_TIME_MS
+            <= exchange_ms
+            <= _MAX_PLAUSIBLE_EXCHANGE_TIME_MS
+        ):
+            reason = f"Exchange time is not finite or plausible: {exchange_time_ms!r}"
+            self.halt(reason)
+            raise SystemHalted(reason)
+        local_ms = time.time() * 1000.0
+        drift_s = abs(local_ms - exchange_ms) / 1000.0
         if drift_s > self.max_clock_drift_seconds:
-            self.halt(f"Clock drift {drift_s:.2f}s exceeds limit {self.max_clock_drift_seconds}s")
+            reason = f"Clock drift {drift_s:.2f}s exceeds limit {self.max_clock_drift_seconds}s"
+            self.halt(reason)
             raise SystemHalted("Clock drift too large")
 
     # ------------------------------------------------------------------
@@ -121,6 +231,17 @@ class SafetyMonitor:
 
     def update_equity(self, equity: float) -> None:
         """Call periodically with current total equity."""
+        try:
+            if isinstance(equity, bool):
+                raise ValueError("boolean is not an equity value")
+            equity = float(equity)
+        except (TypeError, ValueError, OverflowError):
+            self.halt(f"Invalid or unknown equity value: {equity!r}")
+            raise RiskLimitExceeded("Equity unavailable or invalid")
+        if not math.isfinite(equity) or equity <= 0:
+            self.halt(f"Invalid equity value: {equity!r}")
+            raise RiskLimitExceeded("Equity unavailable or invalid")
+
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         if self._current_day != today:
@@ -137,7 +258,7 @@ class SafetyMonitor:
         # Daily loss
         if self._day_start_equity > 0:
             daily_ret = (equity - self._day_start_equity) / self._day_start_equity
-            if daily_ret < -self.daily_loss_limit:
+            if daily_ret <= -self.daily_loss_limit:
                 self.halt(
                     f"Daily loss limit breached: {daily_ret:.2%} < -{self.daily_loss_limit:.2%}"
                 )
@@ -146,7 +267,7 @@ class SafetyMonitor:
         # Max drawdown from peak
         if self._peak_equity > 0:
             dd = (self._peak_equity - equity) / self._peak_equity
-            if dd > self.max_drawdown:
+            if dd >= self.max_drawdown:
                 self.halt(
                     f"Max drawdown breached: {dd:.2%} > {self.max_drawdown:.2%}"
                 )
@@ -155,18 +276,32 @@ class SafetyMonitor:
     def restore_equity_state(self) -> None:
         """Load peak / day-start from DB after restart."""
         peak = self.repo.get_system_state("peak_equity")
-        if peak:
-            try:
-                self._peak_equity = float(peak)
-            except ValueError:
-                pass
         day_eq = self.repo.get_system_state("day_start_equity")
-        if day_eq:
-            try:
-                self._day_start_equity = float(day_eq)
-            except ValueError:
-                pass
-        self._current_day = self.repo.get_system_state("current_day")
+        current_day = self.repo.get_system_state("current_day")
+        persisted = (peak, day_eq, current_day)
+        if any(value is not None for value in persisted) and not all(
+            value is not None for value in persisted
+        ):
+            self.halt("Incomplete persisted equity state")
+            return
+        if peak is None:
+            return  # Fresh database; the first valid equity sample initializes state.
+
+        try:
+            peak_value = float(peak)
+            day_value = float(day_eq)
+            datetime.strptime(current_day, "%Y-%m-%d")
+            if not math.isfinite(peak_value) or peak_value <= 0:
+                raise ValueError("peak_equity must be finite and positive")
+            if not math.isfinite(day_value) or day_value <= 0:
+                raise ValueError("day_start_equity must be finite and positive")
+        except (TypeError, ValueError) as e:
+            self.halt(f"Invalid persisted equity state: {e}")
+            return
+
+        self._peak_equity = peak_value
+        self._day_start_equity = day_value
+        self._current_day = current_day
 
 
 class Reconciler:
@@ -236,6 +371,8 @@ class Reconciler:
         if summary["local_only"] or summary["remote_only"]:
             logger.warning("Reconciliation discrepancies: %s", summary)
             self.repo.record_risk_event("RECONCILE_DIFF", str(summary))
+            if self.safety:
+                self.safety.halt(f"Unresolved order reconciliation discrepancies: {summary}")
 
         return summary
 

@@ -18,6 +18,7 @@ Design notes (from DeepSeek review):
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,6 +30,7 @@ from live.exceptions import (
     InsufficientFunds,
     InvalidOrder,
     OrderNotFound,
+    ProtectionOrderError,
     SystemHalted,
 )
 from live.models import (
@@ -53,25 +55,40 @@ class OrderManager:
     ):
         self.broker = broker
         self.repo = repository or OrderRepository()
+        if not math.isfinite(default_sl_pct) or not 0 < default_sl_pct < 1:
+            raise ValueError("default_sl_pct must be finite and in (0, 1)")
+        if not math.isfinite(default_tp_pct) or not 0 < default_tp_pct < 1:
+            raise ValueError("default_tp_pct must be finite and in (0, 1)")
         self.default_sl_pct = default_sl_pct
         self.default_tp_pct = default_tp_pct
+        self._halted = False
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def is_halted(self) -> bool:
-        return self.repo.get_system_state("kill_switch", "0") == "1"
+        if self._halted:
+            return True
+        try:
+            self._halted = self.repo.get_system_state("kill_switch", "0") == "1"
+        except Exception as e:
+            self._halted = True
+            logger.critical("Fail-closed: cannot verify persisted kill-switch state: %s", e)
+        return self._halted
 
     def halt(self, reason: str = "manual") -> None:
-        self.repo.set_system_state("kill_switch", "1")
-        self.repo.record_risk_event("HALT", reason)
+        # Keep the in-process order gate closed even if persistence is unavailable.
+        self._halted = True
         logger.warning("System HALTED – reason: %s", reason)
+        self.repo.set_system_state("kill_switch", "1")
+        self.repo.set_system_state("kill_switch_reason", reason)
+        self.repo.record_risk_event("HALT", reason)
 
     def resume(self) -> None:
-        self.repo.set_system_state("kill_switch", "0")
-        self.repo.record_risk_event("RESUME", "manual resume")
-        logger.info("System RESUMED")
+        raise SystemHalted(
+            "Unvalidated resume is disabled; use the runtime --resume preflight"
+        )
 
     def create_entry_order(
         self,
@@ -89,6 +106,12 @@ class OrderManager:
         """
         if self.is_halted():
             raise SystemHalted("Kill-switch is active – no new orders allowed")
+        if not math.isfinite(amount) or amount <= 0:
+            raise InvalidOrder("Order amount must be finite and positive")
+        if order_type == OrderType.LIMIT and (
+            price is None or not math.isfinite(price) or price <= 0
+        ):
+            raise InvalidOrder("Limit order price must be finite and positive")
 
         client_id = generate_client_order_id("entry")
         order = Order(
@@ -143,6 +166,10 @@ class OrderManager:
                 self._place_protection_orders(order)
 
             return order
+
+        except ProtectionOrderError:
+            # The entry may already be filled; preserve that state and keep the halt active.
+            raise
 
         except DuplicateOrder:
             # Idempotency: order already exists on the broker
@@ -216,9 +243,18 @@ class OrderManager:
         Currently uses separate orders. Designed so that OCO can be
         swapped in later without changing the call sites.
         """
-        if entry.average_price is None or entry.filled <= 0:
-            logger.warning("Cannot place protection for %s – no fill price", entry.client_order_id)
-            return
+        if (
+            entry.average_price is None
+            or not math.isfinite(entry.average_price)
+            or entry.average_price <= 0
+            or not math.isfinite(entry.filled)
+            or entry.filled <= 0
+        ):
+            error = "entry fill has no valid price or quantity"
+            self._halt_for_protection_failure(entry, "protection", error)
+            raise ProtectionOrderError(
+                f"Cannot protect entry {entry.client_order_id}: {error}"
+            )
 
         entry_price = entry.average_price
         amount = entry.filled
@@ -235,7 +271,7 @@ class OrderManager:
             sl_side = OrderSide.BUY
             tp_side = OrderSide.BUY
 
-        # Stop-loss (stop-market for simplicity)
+        # Place the loss-limiting stop first; never proceed to TP if it is uncertain.
         try:
             sl = self._create_protection_order(
                 parent=entry,
@@ -245,10 +281,13 @@ class OrderManager:
                 stop_price=sl_price,
                 tag="sl",
             )
+            self._require_protection(sl, amount, "SL")
             logger.info("SL placed for %s → %s @ stop %.2f", entry.client_order_id, sl.client_order_id, sl_price)
         except Exception as e:
-            logger.error("Failed to place SL for %s: %s", entry.client_order_id, e)
-            self.repo.record_risk_event("PROTECTION_FAILED", f"SL for {entry.client_order_id}: {e}")
+            self._halt_for_protection_failure(entry, "SL", e)
+            raise ProtectionOrderError(
+                f"Stop-loss protection failed for {entry.client_order_id}: {e}"
+            ) from e
 
         # Take-profit (limit)
         try:
@@ -260,10 +299,30 @@ class OrderManager:
                 price=tp_price,
                 tag="tp",
             )
+            self._require_protection(tp, amount, "TP")
             logger.info("TP placed for %s → %s @ %.2f", entry.client_order_id, tp.client_order_id, tp_price)
         except Exception as e:
-            logger.error("Failed to place TP for %s: %s", entry.client_order_id, e)
-            self.repo.record_risk_event("PROTECTION_FAILED", f"TP for {entry.client_order_id}: {e}")
+            # Keep the valid stop-loss active; halt new entries while protection is incomplete.
+            self._halt_for_protection_failure(entry, "TP", e)
+            raise ProtectionOrderError(
+                f"Take-profit protection failed for {entry.client_order_id}: {e}"
+            ) from e
+
+    def _require_protection(self, order: Order, expected_amount: float, label: str) -> None:
+        if order.status != OrderState.OPEN:
+            raise ProtectionOrderError(
+                f"{label} order is {order.status.value}, not confirmed OPEN"
+            )
+        if not math.isclose(order.amount, expected_amount, rel_tol=1e-9, abs_tol=1e-12):
+            raise ProtectionOrderError(
+                f"{label} order amount {order.amount} does not match filled amount {expected_amount}"
+            )
+
+    def _halt_for_protection_failure(self, entry: Order, label: str, error: object) -> None:
+        detail = f"{label} for {entry.client_order_id}: {error}"
+        logger.error("Protection failure: %s", detail)
+        self.halt(f"Protection failure: {detail}")
+        self.repo.record_risk_event("PROTECTION_FAILED", detail)
 
     def _create_protection_order(
         self,
@@ -293,18 +352,27 @@ class OrderManager:
         order.status = OrderState.SUBMITTING
         self.repo.save_order(order)
 
-        submitted = self.broker.create_order(
-            symbol=parent.symbol,
-            side=side,
-            type=order_type,
-            amount=amount,
-            price=price,
-            stop_price=stop_price,
-            client_order_id=client_id,
-        )
+        try:
+            submitted = self.broker.create_order(
+                symbol=parent.symbol,
+                side=side,
+                type=order_type,
+                amount=amount,
+                price=price,
+                stop_price=stop_price,
+                client_order_id=client_id,
+            )
+        except Exception as e:
+            # A timeout may mean the exchange accepted the order; mark it UNKNOWN for reconciliation.
+            order.status = OrderState.UNKNOWN
+            order.error_message = str(e)
+            order.updated_at = datetime.now(timezone.utc)
+            self.repo.save_order(order)
+            raise
 
         order.status = submitted.status
         order.exchange_order_id = submitted.exchange_order_id
+        order.amount = submitted.amount
         order.filled = submitted.filled
         order.remaining = submitted.remaining
         order.average_price = submitted.average_price
