@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -94,6 +94,21 @@ def _decimal(value: Any, field_name: str) -> Decimal:
     return result
 
 
+def _localize_unambiguous(value: datetime, zone: tzinfo) -> datetime:
+    """Attach a timezone only when the naive wall time maps to one instant."""
+    candidates = [value.replace(tzinfo=zone, fold=fold) for fold in (0, 1)]
+    valid = [
+        candidate
+        for candidate in candidates
+        if candidate.astimezone(UTC).astimezone(zone).replace(tzinfo=None) == value
+    ]
+    if not valid:
+        raise ValueError(f"expiry local time {value!s} does not exist in {zone!s}")
+    if len({candidate.utcoffset() for candidate in valid}) > 1:
+        raise ValueError(f"expiry local time {value!s} is ambiguous in {zone!s}")
+    return valid[0]
+
+
 def _parse_expiry(value: str | None, expiry_timezone: tzinfo) -> datetime | None:
     """Parse supported expiry forms; naive timestamps use the supplied timezone."""
     if not value:
@@ -114,7 +129,7 @@ def _parse_expiry(value: str | None, expiry_timezone: tzinfo) -> datetime | None
             return None
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=expiry_timezone)
+        parsed = _localize_unambiguous(parsed, expiry_timezone)
     return parsed
 
 
@@ -344,8 +359,8 @@ def analyze_book(
                 raise ValueError(
                     f"{side_name}[{index}].px must be greater than 0 and at most 1"
                 )
-            if size < _ZERO:
-                raise ValueError(f"{side_name}[{index}].sz must not be negative")
+            if size <= _ZERO:
+                raise ValueError(f"{side_name}[{index}].sz must be positive")
             parsed.append((price, size))
         parsed_sides.append(parsed)
 

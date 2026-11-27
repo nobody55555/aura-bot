@@ -16,10 +16,12 @@ Educational / research use. Crypto trading is high risk — never risk money you
 | SQLite persistence + reconciliation | ✅ Working |
 | SafetyMonitor (kill-switch, stale data, clock drift) | ✅ Working |
 | E-mail alerts (SMTP via env) | ✅ Working |
-| CcxtBroker (live adapter) | ✅ Implemented, **live orders still gated** |
-| Live order placement | 🔒 Explicitly blocked in `main.py` until you enable it |
+| CcxtBroker (live adapter) | ✅ Implemented for explicitly selected live mode |
+| Live order placement | ✅ Available after safety preflight and risk checks |
 
 **Default mode is paper.** No exchange API keys required for paper mode.
+
+For the current reviewed state, exact code changes, tests, operating flow, and open review questions, see [the 27 November 2026 review handoff](docs/AURA_BOT_REVIEW_HANDOFF_2026-11-27.md). The older [25 November handoff](HANDOFF_AURA_2026-11-25.md) is a historical snapshot and is superseded where its status differs.
 
 ---
 
@@ -29,7 +31,7 @@ Educational / research use. Crypto trading is high risk — never risk money you
 signal (analyzer / strategy / features / elliott)
     → risk checks
     → OrderManager
-        → PaperBroker  (default)  or  CcxtBroker (live, gated)
+        → PaperBroker (default) or CcxtBroker (live, explicit opt-in)
     → SQLite (orders, fills, system state)
     → SafetyMonitor + optional e-mail alerts
 ```
@@ -38,7 +40,7 @@ Design principles:
 
 - Exchange is the source of truth (reconciliation on startup and periodically).
 - Every order uses a unique `clientOrderId` (idempotency).
-- Live mode requires explicit config + credentials; order placement remains gated.
+- Live mode requires explicit config + credentials; eligible orders pass through the OrderManager and its protection-order handling.
 - LLM is optional and **never** required for the primary signal path.
 
 ---
@@ -171,12 +173,12 @@ The official REST base is `https://api.hyperliquid-testnet.xyz` (not the host wi
 
 ---
 
-## Live mode (not enabled by default)
+## Live mode (available, not enabled by default)
 
-1. Set `AURA_MODE=live` and valid exchange credentials in `.env`.
-2. Run extensively in paper first.
-3. Live order placement is currently hard-gated in `main.py`; this change does not enable it.
-4. Start with very small size and strict daily loss / drawdown limits.
+1. Set `AURA_MODE=live` and valid exchange credentials in `.env`; the default remains `paper`.
+2. Run extensively in paper first and independently review strategy behavior and order sizing.
+3. In live mode, eligible buy signals can submit real market orders through the configured CCXT exchange after account-equity, exchange-clock, kill-switch, and risk checks pass. Filled entries request stop-loss and take-profit protection through the OrderManager.
+4. Real execution, exchange-specific order parameters, and protective-order behavior must be verified for the selected exchange before risking funds. Use API keys restricted to the minimum required permissions, start with very small size, and set strict daily-loss / drawdown limits.
 
 ---
 

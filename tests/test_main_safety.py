@@ -12,6 +12,7 @@ from live.broker.ccxt_broker import CcxtBroker
 from live.db.database import get_connection
 from live.db.repository import OrderRepository
 from live.exceptions import SystemHalted
+from live.models import OrderSide, OrderType
 from live.safety import SafetyMonitor
 
 
@@ -366,7 +367,9 @@ def test_normal_runtime_start_never_clears_persisted_halt(safety, monkeypatch):
     assert broker.balance_calls == 0
 
 
-def test_live_buy_signal_is_blocked_before_order_manager(safety, monkeypatch):
+def test_live_buy_signal_submits_through_order_manager_after_preflight(
+    safety, monkeypatch
+):
     class Values:
         iloc = [60_000.0]
 
@@ -403,26 +406,35 @@ def test_live_buy_signal_is_blocked_before_order_manager(safety, monkeypatch):
         def position_size(self, equity, entry, stop):
             return 0.001
 
-    class Alerts:
+    class RecordingOrderManager:
         def __init__(self):
-            self.warnings = []
+            self.calls = []
 
-        def warning(self, *args):
-            self.warnings.append(args)
+        def create_entry_order(self, **kwargs):
+            self.calls.append(kwargs)
+            return type(
+                "Order",
+                (),
+                {
+                    "client_order_id": "live-entry-test",
+                    "status": type("Status", (), {"value": "filled"})(),
+                    "filled": kwargs["amount"],
+                },
+            )()
 
     analyzer = BullishAnalyzer()
     broker = FakeBroker(
         balance={"USDT": {"total": 10_000.0}}, exchange=FakeExchange()
     )
-    order_manager = FakeOrderManager()
-    alerts = Alerts()
+    order_manager = RecordingOrderManager()
     ctx = {
         "safety": safety,
         "analyzer": analyzer,
         "broker": broker,
         "risk": ReadyRisk(),
         "order_manager": order_manager,
-        "alerts": alerts,
+        "OrderSide": OrderSide,
+        "OrderType": OrderType,
     }
     now = time.time()
     period = max(300, main.settings.poll_seconds * 5)
@@ -433,10 +445,12 @@ def test_live_buy_signal_is_blocked_before_order_manager(safety, monkeypatch):
     main._process_cycle(ctx, mode="live")
 
     assert analyzer.signal_calls == 1
-    assert order_manager.order_calls == 0
-    assert alerts.warnings == [
-        (
-            "Live order blocked",
-            "Signal wanted to buy but live placement is gated in main.py",
-        )
-    ]
+    assert len(order_manager.calls) == 1
+    assert order_manager.calls[0] == {
+        "symbol": main.settings.symbol,
+        "side": OrderSide.BUY,
+        "amount": 0.001,
+        "order_type": OrderType.MARKET,
+        "strategy_tag": "aura-signal",
+        "place_protection": True,
+    }

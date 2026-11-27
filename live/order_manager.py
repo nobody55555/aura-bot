@@ -71,7 +71,18 @@ class OrderManager:
         if self._halted:
             return True
         try:
-            self._halted = self.repo.get_system_state("kill_switch", "0") == "1"
+            persisted_switch = self.repo.get_system_state("kill_switch", "0")
+            if not isinstance(persisted_switch, str) or persisted_switch not in {
+                "0",
+                "1",
+            }:
+                self._halted = True
+                logger.critical(
+                    "Fail-closed: invalid persisted kill-switch state %r",
+                    persisted_switch,
+                )
+                return True
+            self._halted = persisted_switch == "1"
         except Exception as e:
             self._halted = True
             logger.critical("Fail-closed: cannot verify persisted kill-switch state: %s", e)

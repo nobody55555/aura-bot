@@ -78,7 +78,19 @@ class SafetyMonitor:
         if self._halted:
             return True
         try:
-            halted = self.repo.get_system_state("kill_switch", "0") == "1"
+            persisted_switch = self.repo.get_system_state("kill_switch", "0")
+            if not isinstance(persisted_switch, str) or persisted_switch not in {
+                "0",
+                "1",
+            }:
+                self._halted = True
+                self._halt_reason = (
+                    f"Invalid persisted kill-switch state {persisted_switch!r}; "
+                    "manual recovery required"
+                )
+                logger.critical("Fail-closed: %s", self._halt_reason)
+                return True
+            halted = persisted_switch == "1"
         except Exception as e:
             self._halted = True
             self._halt_reason = f"Cannot verify persisted kill-switch state: {e}"

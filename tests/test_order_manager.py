@@ -103,6 +103,20 @@ def test_persisted_kill_switch_blocks_new_manager(manager, paper_broker, tmp_rep
     assert restarted_manager.get_open_orders("BTC/USDT") == []
 
 
+@pytest.mark.parametrize("corrupt_value", ["true", "2", ""])
+def test_corrupt_persisted_kill_switch_blocks_new_manager(
+    paper_broker, tmp_repo, corrupt_value
+):
+    tmp_repo.set_system_state("kill_switch", corrupt_value)
+    restarted_manager = OrderManager(broker=paper_broker, repository=tmp_repo)
+
+    with pytest.raises(SystemHalted):
+        restarted_manager.create_entry_order("BTC/USDT", OrderSide.BUY, 0.01)
+
+    assert restarted_manager.is_halted()
+    assert restarted_manager.get_open_orders("BTC/USDT") == []
+
+
 def test_limit_order_stays_open(manager, paper_broker):
     paper_broker.update_price("BTC/USDT", 60_000.0)
 

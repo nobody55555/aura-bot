@@ -10,7 +10,7 @@ Paper mode is the default and fully wired to:
   - AlertManager (e-mail, optional)
 
 Live mode requires explicit activation and a working CcxtBroker + credentials.
-Live order placement remains gated until you deliberately enable it.
+Paper mode remains the default; live orders pass through preflight and risk checks.
 """
 
 from __future__ import annotations
@@ -215,30 +215,32 @@ def _process_cycle(ctx, mode: str | None = None) -> None:
                 )
                 if hasattr(broker, "update_price"):
                     broker.update_price(settings.symbol, last)
-
-                order = ctx["order_manager"].create_entry_order(
-                    symbol=settings.symbol,
-                    side=ctx["OrderSide"].BUY,
-                    amount=size,
-                    order_type=ctx["OrderType"].MARKET,
-                    strategy_tag="aura-signal",
-                    place_protection=True,
-                )
-                log.info(
-                    "Order result: %s status=%s filled=%.6f",
-                    order.client_order_id,
-                    order.status.value,
-                    order.filled,
+            elif mode == "live":
+                log.warning(
+                    "LIVE → submitting entry order: buy %.8f %s @ ~%.2f (stop %.2f)",
+                    size,
+                    settings.symbol,
+                    last,
+                    stop,
                 )
             else:
-                log.error(
-                    "Live order placement is still gated. "
-                    "Implement final checks / manual enable before removing this guard."
-                )
-                ctx["alerts"].warning(
-                    "Live order blocked",
-                    "Signal wanted to buy but live placement is gated in main.py",
-                )
+                log.error("Order execution is not supported in mode %r", mode)
+                return
+
+            order = ctx["order_manager"].create_entry_order(
+                symbol=settings.symbol,
+                side=ctx["OrderSide"].BUY,
+                amount=size,
+                order_type=ctx["OrderType"].MARKET,
+                strategy_tag="aura-signal",
+                place_protection=True,
+            )
+            log.info(
+                "Order result: %s status=%s filled=%.6f",
+                order.client_order_id,
+                order.status.value,
+                order.filled,
+            )
 
 
 def _operator_resume(

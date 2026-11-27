@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+from decimal import Decimal, InvalidOperation
 from http.client import HTTPException, HTTPSConnection
 from typing import Any
 from urllib.parse import urlsplit
@@ -29,6 +30,8 @@ _OUTCOME_PRICE_FIELDS = (
     "dayNtlVlm",
     "dayBaseVlm",
 )
+_BINARY_PRICE_FIELDS = frozenset({"markPx", "midPx", "prevDayPx"})
+_VOLUME_FIELDS = frozenset({"dayNtlVlm", "dayBaseVlm"})
 _MAX_INFO_COIN_LENGTH = 128
 _INFO_COIN_RE = re.compile(r"[A-Za-z0-9_#@./:-]{1,128}\Z", re.ASCII)
 _MAX_RESPONSE_BYTES = 5 * 1024 * 1024
@@ -40,6 +43,35 @@ class TestnetOnlyError(ValueError):
 
 class HyperliquidTestnetError(RuntimeError):
     """Raised for transport or response errors from the Testnet Info API."""
+
+
+def _validate_outcome_context_value(field: str, value: Any) -> Any:
+    """Validate an optional numeric HIP-4 price or volume without coercing it."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise HyperliquidTestnetError(
+            f"Outcome context field {field} must be a finite number"
+        )
+    try:
+        numeric = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise HyperliquidTestnetError(
+            f"Outcome context field {field} must be a finite number"
+        ) from exc
+    if not numeric.is_finite():
+        raise HyperliquidTestnetError(
+            f"Outcome context field {field} must be a finite number"
+        )
+    if field in _BINARY_PRICE_FIELDS and not Decimal(0) <= numeric <= Decimal(1):
+        raise HyperliquidTestnetError(
+            f"Outcome context price field {field} must be between 0 and 1"
+        )
+    if field in _VOLUME_FIELDS and numeric < 0:
+        raise HyperliquidTestnetError(
+            f"Outcome context volume field {field} must be nonnegative"
+        )
+    return value
 
 
 def _validate_rest_url(url: str) -> None:
@@ -340,7 +372,8 @@ class HyperliquidTestnetClient:
                     "context_available": context is not None,
                 }
                 for field in _OUTCOME_PRICE_FIELDS:
-                    price_record[field] = context.get(field) if context else None
+                    value = context.get(field) if context else None
+                    price_record[field] = _validate_outcome_context_value(field, value)
                 prices.append(price_record)
         return prices
 

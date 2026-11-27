@@ -58,6 +58,29 @@ def test_persisted_halt_survives_monitor_restart_without_resume(tmp_repo):
     assert tmp_repo.get_system_state("kill_switch") == "1"
 
 
+@pytest.mark.parametrize("corrupt_value", ["true", "2", ""])
+def test_corrupt_persisted_kill_switch_fails_closed_after_restart_and_denies_resume(
+    tmp_repo, corrupt_value
+):
+    tmp_repo.set_system_state("kill_switch", corrupt_value)
+
+    restarted = SafetyMonitor(tmp_repo)
+    assert restarted.is_halted()
+    assert "Invalid persisted kill-switch state" in restarted.get_halt_reason()
+    with pytest.raises(SystemHalted):
+        restarted.require_not_halted()
+
+    with pytest.raises(SystemHalted, match="explicit operator approval"):
+        restarted.resume(
+            "unapproved recovery",
+            equity=10_000.0,
+            exchange_required=False,
+        )
+
+    assert restarted.is_halted()
+    assert tmp_repo.get_system_state("kill_switch") == corrupt_value
+
+
 @pytest.mark.parametrize(
     "exchange_time",
     [None, float("nan"), float("inf"), float("-inf"), "not-a-time", True, 0, 4102444800001],

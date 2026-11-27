@@ -1,5 +1,7 @@
 # Aura-Bot-Meilenstein: Safety/Risk und HIP-4-Screener
 
+> **Historischer Stand vom 25. November 2026.** Dieses Dokument hält den damaligen Branch-Zustand fest und enthält Aussagen (insbesondere zur gesperrten Live-Orderplatzierung und zu 170 Tests), die am 27. November überholt wurden. Für den aktuellen Code, den Paper-Default, den nun ausführbaren expliziten Live-Pfad, die ergänzten Sicherheitskorrekturen und die aktuellen Testnachweise ist [das aktuelle Review-Handoff](docs/AURA_BOT_REVIEW_HANDOFF_2026-11-27.md) maßgeblich.
+
 - **Stand:** 25. November 2026
 - **Arbeitsbranch:** `handoff/aura-bot-2026-11-25`
 - **Ausgangspunkt:** `feature/live-foundation` bei `7353e69b1ef5cc958e335040dadf70d9e1305eea`

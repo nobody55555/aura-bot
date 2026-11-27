@@ -1,7 +1,8 @@
 """Deterministic offline tests for the HIP-4 paper screener."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -126,6 +127,40 @@ def test_metadata_expiry_can_use_an_explicit_timezone_override():
     metadata = parse_outcome_metadata(BTC_OUTCOME, expiry_timezone=offset)
 
     assert metadata.expires_at == datetime(2026, 11, 23, 6, 0, tzinfo=offset)
+
+
+@pytest.mark.parametrize(
+    ("expiry", "message"),
+    [
+        ("20261025-0230", "ambiguous"),
+        ("20260329-0230", "does not exist"),
+    ],
+)
+def test_naive_europe_zurich_expiry_rejects_ambiguous_or_nonexistent_dst_time(
+    expiry, message
+):
+    outcome = {
+        **BTC_OUTCOME,
+        "description": f"class:priceBinary|underlying:BTC|expiry:{expiry}",
+    }
+
+    with pytest.raises(ValueError, match=message):
+        parse_outcome_metadata(outcome, expiry_timezone=ZoneInfo("Europe/Zurich"))
+
+
+def test_explicit_offset_expiry_remains_valid_during_dst_fallback():
+    outcome = {
+        **BTC_OUTCOME,
+        "description": ("class:priceBinary|expiry:2026-10-25T02:30:00+02:00"),
+    }
+
+    metadata = parse_outcome_metadata(
+        outcome, expiry_timezone=ZoneInfo("Europe/Zurich")
+    )
+
+    assert metadata.expires_at.astimezone(UTC) == datetime(
+        2026, 10, 25, 0, 30, tzinfo=UTC
+    )
 
 
 def test_iso_expiry_accepts_lowercase_z_as_utc():
@@ -411,12 +446,21 @@ def test_book_rejects_float_prices_nonfinite_and_invalid_levels():
         analyze_book({"levels": [[{"px": 0.5, "sz": "1"}], []]})
     with pytest.raises(ValueError, match="finite"):
         analyze_book({"levels": [[{"px": "NaN", "sz": "1"}], []]})
-    with pytest.raises(ValueError, match="must not be negative"):
+    with pytest.raises(ValueError, match="must be positive"):
         analyze_book({"levels": [[{"px": "0.5", "sz": "-1"}], []]})
     with pytest.raises(ValueError, match="depth_levels"):
         analyze_book({"levels": [[], []]}, depth_levels=0)
     with pytest.raises(ValueError, match="book must be a mapping or None"):
         analyze_book("not a mapping")
+
+
+@pytest.mark.parametrize("side_index", [0, 1], ids=["bid", "ask"])
+def test_book_rejects_zero_size_levels_on_both_sides(side_index):
+    levels = [[], []]
+    levels[side_index] = [{"px": "0.5", "sz": "0"}]
+
+    with pytest.raises(ValueError, match="must be positive"):
+        analyze_book({"levels": levels})
 
 
 @pytest.mark.parametrize(

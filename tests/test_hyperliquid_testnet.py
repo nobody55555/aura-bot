@@ -378,6 +378,68 @@ def test_get_outcome_prices_marks_missing_context_without_guessing(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("markPx", "NaN"),
+        ("midPx", "Infinity"),
+        ("prevDayPx", "1.01"),
+        ("midPx", "-0.01"),
+        ("dayNtlVlm", "-0.1"),
+        ("dayBaseVlm", "NaN"),
+        ("markPx", True),
+        ("midPx", {"unexpected": "object"}),
+    ],
+)
+def test_get_outcome_prices_rejects_invalid_context_values(monkeypatch, field, value):
+    client = hl.HyperliquidTestnetClient()
+    monkeypatch.setattr(client, "get_outcome_metadata", lambda: SAMPLE_OUTCOMES[:1])
+    monkeypatch.setattr(
+        hl,
+        "_post_info_json",
+        lambda *args: [
+            {"tokens": [], "universe": []},
+            [{"coin": "#1230", field: value}],
+        ],
+    )
+
+    with pytest.raises(hl.HyperliquidTestnetError, match=field):
+        client.get_outcome_prices()
+
+
+def test_get_outcome_prices_allows_binary_price_bounds_zero_volumes_and_missing_values(
+    monkeypatch,
+):
+    client = hl.HyperliquidTestnetClient()
+    monkeypatch.setattr(client, "get_outcome_metadata", lambda: SAMPLE_OUTCOMES[:1])
+    monkeypatch.setattr(
+        hl,
+        "_post_info_json",
+        lambda *args: [
+            {"tokens": [], "universe": []},
+            [
+                {
+                    "coin": "#1230",
+                    "markPx": "0",
+                    "midPx": "1",
+                    "prevDayPx": None,
+                    "dayNtlVlm": "0",
+                    "dayBaseVlm": "0.0",
+                }
+            ],
+        ],
+    )
+
+    prices = client.get_outcome_prices()
+
+    assert prices[0]["markPx"] == "0"
+    assert prices[0]["midPx"] == "1"
+    assert prices[0]["prevDayPx"] is None
+    assert prices[0]["dayNtlVlm"] == "0"
+    assert prices[0]["dayBaseVlm"] == "0.0"
+    assert prices[1]["context_available"] is False
+
+
+@pytest.mark.parametrize(
     "spot_response",
     [
         {"tokens": [], "universe": []},

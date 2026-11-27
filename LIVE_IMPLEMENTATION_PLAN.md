@@ -3,6 +3,8 @@
 **Date:** 29 August 2026  
 **Status:** Phase 1 started (structure + PaperBroker + Models)
 
+> **Historical planning snapshot.** This plan predates the later broker, OrderManager, safety, and runtime work. Its phase checkboxes and proposed `AURA_LIVE=1` double gate do not describe current runtime behavior. See the [current review handoff](docs/AURA_BOT_REVIEW_HANDOFF_2026-11-27.md) for the checked-in live path, paper default, safeguards, verification, and outstanding exchange-specific review items.
+
 ---
 
 ## 1. Goal
